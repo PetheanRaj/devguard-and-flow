@@ -1,0 +1,225 @@
+{
+  "name": "devguard-flow-suite",
+  "displayName": "DevGuard Flow Suite",
+  "description": "Zero-bloat developer guard: .env demo-masking, secret scanner, branch log cleaner, regex/cron translator, and scoped clipboard history.",
+  "version": "0.2.2",
+  "publisher": "PetheanRaj",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Petheanraj/devguard-and-flow"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "keywords": [
+    "env",
+    "secrets",
+    "security",
+    "cleaner",
+    "console.log",
+    "regex",
+    "cron",
+    "clipboard"
+  ],
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "devguard-view-container",
+          "title": "DevGuard Flow",
+          "icon": "resources/activity-bar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "devguard-view-container": [
+        {
+          "id": "devguard.clipboardView",
+          "name": "Clipboard Ring"
+        }
+      ]
+    },
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "devguard.pinClip",
+          "when": "view == devguard.clipboardView",
+          "group": "inline"
+        },
+        {
+          "command": "devguard.deleteClip",
+          "when": "view == devguard.clipboardView",
+          "group": "inline"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "devguard.toggleDemoMode",
+        "title": "DevGuard: Toggle Demo Mode (.env Masking)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.scanSecrets",
+        "title": "DevGuard: Scan Current File for Secrets",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.syncEnvExample",
+        "title": "DevGuard: Sync Missing Keys to .env.example",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.autoGenerateEnvExample",
+        "title": "DevGuard: Generate .env.example Template",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.compareEnvFiles",
+        "title": "DevGuard: Compare Environment Files (.env Diff)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.installGitHook",
+        "title": "DevGuard: Install Pre-Commit Secret Guard Hook",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.cleanBranchLogs",
+        "title": "DevGuard: Clean Branch Debug Logs",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.testRegex",
+        "title": "DevGuard: Test Regex Pattern Interactively",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.showClipboardHistory",
+        "title": "DevGuard: Show Clipboard History Ring",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.copy",
+        "title": "DevGuard: Copy and Record in Ring",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.cut",
+        "title": "DevGuard: Cut and Record in Ring",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.pinClip",
+        "title": "DevGuard: Pin / Unpin Snippet",
+        "icon": "$(pinned)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.deleteClip",
+        "title": "DevGuard: Remove Snippet",
+        "icon": "$(trash)",
+        "category": "DevGuard"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "devguard.showClipboardHistory",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "devguard.copy",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "devguard.cut",
+        "key": "ctrl+x",
+        "mac": "cmd+x",
+        "when": "editorTextFocus && editorHasSelection && !editorReadonly"
+      }
+    ],
+    "configuration": {
+      "title": "DevGuard Flow Suite",
+      "properties": {
+        "devguard.enableCodeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show plain-English CodeLens above regex literals and cron expressions."
+        },
+        "devguard.baseBranch": {
+          "type": "string",
+          "default": "main",
+          "description": "Base Git branch used to identify newly added debug console statements."
+        },
+        "devguard.customLogPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "logger.debug",
+            "pino.debug",
+            "console.tron"
+          ],
+          "description": "Custom logger function signatures to track for branch cleanup (e.g. logger.debug, pino.debug)."
+        },
+        "devguard.clipboardRingSize": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 5,
+          "maximum": 100,
+          "description": "Maximum number of clipboard history items stored per workspace."
+        },
+        "devguard.secretScanner.entropyThreshold": {
+          "type": "number",
+          "default": 4.2,
+          "minimum": 3.0,
+          "maximum": 6.0,
+          "description": "Shannon entropy threshold above which suspicious strings are flagged as potential secrets."
+        },
+        "devguard.secretScanner.minSecretLength": {
+          "type": "integer",
+          "default": 16,
+          "minimum": 8,
+          "maximum": 64,
+          "description": "Minimum string length considered for entropy analysis in secret scanning."
+        },
+        "devguard.demoMode.maskPattern": {
+          "type": "string",
+          "default": "••••••••••••••••",
+          "description": "Visual placeholder mask applied to .env values in Demo Mode."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "node esbuild.js --production",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cronstrue": "^3.39.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.24",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.25.1",
+    "typescript": "^5.8.2"
+  }
+}
