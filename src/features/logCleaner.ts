@@ -28,9 +28,10 @@ export class LogCleanerFeature implements vscode.Disposable {
     this.statusBarItem.command = 'devguard.cleanBranchLogs';
     this.disposables.push(this.statusBarItem);
 
-    // Register Command
+    // Register Commands
     this.disposables.push(
-      vscode.commands.registerCommand('devguard.cleanBranchLogs', () => this.cleanBranchLogs())
+      vscode.commands.registerCommand('devguard.cleanBranchLogs', () => this.cleanBranchLogs()),
+      vscode.commands.registerCommand('devguard.transformLogs', () => this.transformLogs())
     );
 
     // Wire refresh events
@@ -327,6 +328,84 @@ export class LogCleanerFeature implements vscode.Disposable {
       this.refreshDecorations();
     } else {
       vscode.window.showErrorMessage('DevGuard: Failed to apply edits to debug logs.');
+    }
+  }
+
+  /**
+   * Transforms console.log / print statements into structured logger or dev-guarded blocks.
+   */
+  public async transformLogs(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showInformationMessage('DevGuard: Open a source file to transform debug statements.');
+      return;
+    }
+
+    const doc = editor.document;
+    const entries = this.scanDebugLogsInDocument(doc);
+    if (entries.length === 0) {
+      vscode.window.showInformationMessage('DevGuard: No debug statements detected in active file.');
+      return;
+    }
+
+    const transformation = await vscode.window.showQuickPick(
+      [
+        {
+          label: '$(symbol-method) Convert to Structured Logger (logger.debug)',
+          description: 'Replaces console.log(...) with logger.debug(...)',
+          type: 'structured' as const,
+        },
+        {
+          label: '$(info) Convert to console.debug',
+          description: 'Replaces console.log(...) with console.debug(...)',
+          type: 'debug' as const,
+        },
+        {
+          label: '$(shield) Wrap with Development Guard',
+          description: 'Wraps with: if (process.env.NODE_ENV !== "production")',
+          type: 'guard' as const,
+        },
+      ],
+      {
+        title: `DevGuard: Transform ${entries.length} Debug Log(s)`,
+        placeHolder: 'Select log transformation style',
+      }
+    );
+
+    if (!transformation) return;
+
+    entries.sort((a, b) => b.line - a.line);
+    const workspaceEdit = new vscode.WorkspaceEdit();
+
+    for (const entry of entries) {
+      const line = doc.lineAt(entry.line);
+      const indent = line.text.match(/^\s*/)?.[0] || '';
+      const trimmed = line.text.trim();
+
+      let transformedLine = line.text;
+
+      if (transformation.type === 'structured') {
+        transformedLine = line.text.replace(/\bconsole\.(?:log|warn|info)\s*\(/, 'logger.debug(');
+      } else if (transformation.type === 'debug') {
+        transformedLine = line.text.replace(/\bconsole\.log\s*\(/, 'console.debug(');
+      } else if (transformation.type === 'guard') {
+        const isPython = doc.languageId === 'python';
+        if (isPython) {
+          transformedLine = `${indent}if os.getenv("ENV") != "production":\n${indent}    ${trimmed}`;
+        } else {
+          transformedLine = `${indent}if (process.env.NODE_ENV !== 'production') {\n${indent}  ${trimmed}\n${indent}}`;
+        }
+      }
+
+      workspaceEdit.replace(doc.uri, line.range, transformedLine);
+    }
+
+    const applied = await vscode.workspace.applyEdit(workspaceEdit);
+    if (applied) {
+      vscode.window.showInformationMessage(
+        `DevGuard: Transformed ${entries.length} debug statement(s).`
+      );
+      this.refreshDecorations();
     }
   }
 

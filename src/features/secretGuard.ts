@@ -36,7 +36,8 @@ export class SecretGuardFeature implements vscode.Disposable {
       ),
       vscode.commands.registerCommand('devguard.installGitHook', () => this.installPreCommitHook()),
       vscode.commands.registerCommand('devguard.compareEnvFiles', () => this.compareEnvFiles()),
-      vscode.commands.registerCommand('devguard.autoGenerateEnvExample', () => this.autoGenerateEnvExample())
+      vscode.commands.registerCommand('devguard.autoGenerateEnvExample', () => this.autoGenerateEnvExample()),
+      vscode.commands.registerCommand('devguard.generateMockEnvValues', () => this.generateMockEnvValues())
     );
 
     // Register CodeActionProvider for syncing .env keys
@@ -409,6 +410,79 @@ export class SecretGuardFeature implements vscode.Disposable {
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(examplePath));
     await vscode.window.showTextDocument(doc);
     vscode.window.showInformationMessage('DevGuard: Generated clean .env.example template.');
+  }
+
+  /**
+   * Generates safe mock development values for local testing.
+   */
+  public async generateMockEnvValues(targetUri?: vscode.Uri): Promise<void> {
+    const uri = targetUri || vscode.window.activeTextEditor?.document.uri;
+    let envContent = '';
+    let targetFileName = '.env.local';
+
+    if (uri && path.basename(uri.fsPath).startsWith('.env')) {
+      envContent = fs.readFileSync(uri.fsPath, 'utf8');
+      targetFileName = path.basename(uri.fsPath) === '.env.example' ? '.env.local' : path.basename(uri.fsPath);
+    } else {
+      const envFiles = await vscode.workspace.findFiles('**/.env*');
+      if (envFiles.length > 0) {
+        const picked = await vscode.window.showQuickPick(
+          envFiles.map((f) => ({ label: path.basename(f.fsPath), description: vscode.workspace.asRelativePath(f), uri: f })),
+          { title: 'DevGuard: Select source .env to generate mock development values from' }
+        );
+        if (!picked) return;
+        envContent = fs.readFileSync(picked.uri.fsPath, 'utf8');
+      } else {
+        vscode.window.showErrorMessage('DevGuard: No .env or .env.example files found in workspace.');
+        return;
+      }
+    }
+
+    const lines = envContent.split('\n');
+    let mockOutput = '# Local Development Environment\n# Auto-generated with safe mock values by DevGuard Flow\n\n';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        mockOutput += '\n';
+        continue;
+      }
+      if (trimmed.startsWith('#')) {
+        mockOutput += `${line}\n`;
+        continue;
+      }
+      if (trimmed.includes('=')) {
+        const key = trimmed.split('=')[0].trim();
+        const mockVal = this.createMockValueForKey(key);
+        mockOutput += `${key}=${mockVal}\n`;
+      }
+    }
+
+    const folders = vscode.workspace.workspaceFolders;
+    const destDir = folders && folders.length > 0 ? folders[0].uri.fsPath : (uri ? path.dirname(uri.fsPath) : '.');
+    const destPath = path.join(destDir, targetFileName);
+
+    fs.writeFileSync(destPath, mockOutput, 'utf8');
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(destPath));
+    await vscode.window.showTextDocument(doc);
+    vscode.window.showInformationMessage(`DevGuard: Generated safe mock development values in ${targetFileName}!`);
+  }
+
+  private createMockValueForKey(key: string): string {
+    const k = key.toUpperCase();
+    if (k.includes('PORT')) return '3000';
+    if (k.includes('DATABASE_URL') || k.includes('DB_URL')) return 'postgres://postgres:postgres@localhost:5432/dev_db';
+    if (k.includes('MONGO')) return 'mongodb://localhost:27017/dev_db';
+    if (k.includes('REDIS')) return 'redis://localhost:6379';
+    if (k.includes('STRIPE')) return 'sk_test_mock_sandbox_token_1234567890abcdef';
+    if (k.includes('AWS_ACCESS') || k.includes('AWS_KEY')) return 'AKIA_MOCK_LOCAL_DEVELOPMENT_KEY';
+    if (k.includes('AWS_SECRET')) return 'mock_aws_secret_key_placeholder_local_dev';
+    if (k.includes('JWT') || k.includes('SECRET') || k.includes('TOKEN')) return 'dev_mock_secret_key_32_characters_long_hex';
+    if (k.includes('API_KEY')) return 'dev_api_key_sample_1234567890';
+    if (k.includes('URL') || k.includes('ENDPOINT') || k.includes('HOST')) return 'http://localhost:3000/api';
+    if (k.includes('EMAIL')) return 'developer@local.test';
+    if (k.includes('DEBUG') || k.includes('BOOL') || k.includes('ENABLE')) return 'true';
+    return 'dev_mock_value';
   }
 
   /**

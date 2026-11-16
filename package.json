@@ -2,7 +2,7 @@
   "name": "devguard-flow-suite",
   "displayName": "DevGuard Flow Suite",
   "description": "Zero-bloat developer guard: .env demo-masking, secret scanner, branch log cleaner, regex/cron translator, and scoped clipboard history.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "PetheanRaj",
   "icon": "icon.png",
   "repository": {
@@ -82,6 +82,16 @@
       {
         "command": "devguard.autoGenerateEnvExample",
         "title": "DevGuard: Generate .env.example Template",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.generateMockEnvValues",
+        "title": "DevGuard: Populate .env with Mock Dev Values",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.transformLogs",
+        "title": "DevGuard: Transform Logs (Structured Logger / Guard)",
         "category": "DevGuard"
       },
       {
