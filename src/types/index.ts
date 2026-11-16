@@ -15,14 +15,16 @@ export interface ClipboardItem {
 }
 
 /**
- * Representation of a detected debug log statement newly added in the current branch.
+ * Representation of a detected debug log statement.
  */
 export interface DebugLogEntry {
   uri: vscode.Uri;
+  relativePath: string;
   line: number;
   range: vscode.Range;
   text: string;
   functionName: string;
+  isBranchOnly?: boolean;
 }
 
 /**

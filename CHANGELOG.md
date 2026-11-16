@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-11-16
+
+### Added
+- **Repository-Wide Debug Statement Finder:** Fast asynchronous scanner searching all files across the repository for debug logs.
+- **Dedicated Debug Finder TreeView in Activity Bar:** File-grouped explorer (`devguard.debugFinderView`) listing debug statements by filename, line number, and function type.
+- **Click-to-Jump Navigation:** Clicking any debug log in the tree opens the file and highlights the exact line and position in the editor.
+- **Filter by Filename / Path:** Search box to filter debug statements by file name or extension (e.g. `*.py`, `auth`, `api`).
+- **Scope Toggle:** Seamlessly switch between scanning the **Entire Repository** or **Current Branch Added Only**.
+- **Workspace Batch Cleaner:** QuickPick preview matching by filename to batch delete or comment out debug statements across the repository.
+
+---
+
 ## [0.2.3] - 2026-11-16
 
 ### Added

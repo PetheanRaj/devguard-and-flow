@@ -2,7 +2,7 @@
   "name": "devguard-flow-suite",
   "displayName": "DevGuard Flow Suite",
   "description": "Zero-bloat developer guard: .env demo-masking, secret scanner, branch log cleaner, regex/cron translator, and scoped clipboard history.",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "publisher": "PetheanRaj",
   "icon": "icon.png",
   "repository": {
@@ -44,13 +44,49 @@
     "views": {
       "devguard-view-container": [
         {
+          "id": "devguard.debugFinderView",
+          "name": "Debug Statement Finder"
+        },
+        {
           "id": "devguard.clipboardView",
           "name": "Clipboard Ring"
         }
       ]
     },
     "menus": {
+      "view/title": [
+        {
+          "command": "devguard.filterRepoLogs",
+          "when": "view == devguard.debugFinderView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "devguard.toggleLogScope",
+          "when": "view == devguard.debugFinderView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "devguard.cleanWorkspaceLogs",
+          "when": "view == devguard.debugFinderView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "devguard.refreshRepoLogs",
+          "when": "view == devguard.debugFinderView",
+          "group": "navigation@4"
+        }
+      ],
       "view/item/context": [
+        {
+          "command": "devguard.deleteLogItem",
+          "when": "view == devguard.debugFinderView && viewItem == debugLogItem",
+          "group": "inline@1"
+        },
+        {
+          "command": "devguard.commentLogItem",
+          "when": "view == devguard.debugFinderView && viewItem == debugLogItem",
+          "group": "inline@2"
+        },
         {
           "command": "devguard.pinClip",
           "when": "view == devguard.clipboardView",
@@ -107,6 +143,48 @@
       {
         "command": "devguard.cleanBranchLogs",
         "title": "DevGuard: Clean Branch Debug Logs",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.scanRepoLogs",
+        "title": "DevGuard: Find All Debug Statements in Repository",
+        "icon": "$(search)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.cleanWorkspaceLogs",
+        "title": "DevGuard: Clean All Repository Debug Statements",
+        "icon": "$(trash)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.filterRepoLogs",
+        "title": "DevGuard: Filter Debug Statements by Filename",
+        "icon": "$(filter)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.toggleLogScope",
+        "title": "DevGuard: Toggle Scan Scope (Repo vs Branch)",
+        "icon": "$(git-branch)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.refreshRepoLogs",
+        "title": "DevGuard: Refresh Debug Statements Scan",
+        "icon": "$(refresh)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.deleteLogItem",
+        "title": "DevGuard: Delete Debug Statement",
+        "icon": "$(trash)",
+        "category": "DevGuard"
+      },
+      {
+        "command": "devguard.commentLogItem",
+        "title": "DevGuard: Comment Out Debug Statement",
+        "icon": "$(comment)",
         "category": "DevGuard"
       },
       {

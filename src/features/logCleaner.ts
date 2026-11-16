@@ -5,12 +5,17 @@ import { debounce } from '../utils/debounce';
 import { matchDebugStatement, getCommentPrefix } from '../utils/debugPatterns';
 import { DebugLogEntry } from '../types';
 
+export type ScanScope = 'entireRepo' | 'branchOnly';
+
 export class LogCleanerFeature implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private logDecorationType: vscode.TextEditorDecorationType;
   private statusBarItem: vscode.StatusBarItem;
+  private treeDataProvider: DebugFinderTreeDataProvider;
   private branchAddedLinesCache = new Map<string, Set<number>>();
-  private totalDetectedLogs: number = 0;
+  private allRepoLogsCache = new Map<string, DebugLogEntry[]>();
+  private currentScope: ScanScope = 'entireRepo';
+  private fileFilter: string = '';
 
   constructor(private readonly context: vscode.ExtensionContext) {
     // Subtle visual indicator for debug statements
@@ -23,15 +28,39 @@ export class LogCleanerFeature implements vscode.Disposable {
     });
     this.disposables.push(this.logDecorationType);
 
-    // Status Bar Cleanliness Counter
+    // TreeDataProvider for Sidebar Debug Finder
+    this.treeDataProvider = new DebugFinderTreeDataProvider(
+      () => this.getVisibleLogEntries(),
+      () => this.currentScope,
+      () => this.fileFilter
+    );
+    this.disposables.push(
+      vscode.window.registerTreeDataProvider('devguard.debugFinderView', this.treeDataProvider)
+    );
+
+    // Status Bar Counter
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
-    this.statusBarItem.command = 'devguard.cleanBranchLogs';
+    this.statusBarItem.command = 'devguard.scanRepoLogs';
     this.disposables.push(this.statusBarItem);
 
     // Register Commands
     this.disposables.push(
       vscode.commands.registerCommand('devguard.cleanBranchLogs', () => this.cleanBranchLogs()),
-      vscode.commands.registerCommand('devguard.transformLogs', () => this.transformLogs())
+      vscode.commands.registerCommand('devguard.scanRepoLogs', () => this.scanEntireRepo(true)),
+      vscode.commands.registerCommand('devguard.cleanWorkspaceLogs', () => this.cleanWorkspaceLogs()),
+      vscode.commands.registerCommand('devguard.filterRepoLogs', () => this.promptFilterByFilename()),
+      vscode.commands.registerCommand('devguard.toggleLogScope', () => this.toggleScanScope()),
+      vscode.commands.registerCommand('devguard.refreshRepoLogs', () => this.refreshDecorations()),
+      vscode.commands.registerCommand('devguard.transformLogs', () => this.transformLogs()),
+      vscode.commands.registerCommand('devguard.openLogLocation', (entry: DebugLogEntry) =>
+        this.openLocation(entry)
+      ),
+      vscode.commands.registerCommand('devguard.deleteLogItem', (node: any) =>
+        this.deleteLogNode(node)
+      ),
+      vscode.commands.registerCommand('devguard.commentLogItem', (node: any) =>
+        this.commentLogNode(node)
+      )
     );
 
     // Wire refresh events
@@ -63,23 +92,19 @@ export class LogCleanerFeature implements vscode.Disposable {
   }
 
   /**
-   * Refreshes the git diff cache, status bar counter, and applies decorations.
+   * Refreshes the diff cache, repository scan, and visible editor decorations.
    */
   public async refreshDecorations(): Promise<void> {
     const folders = vscode.workspace.workspaceFolders;
     if (!folders || folders.length === 0) {
-      let activeCount = 0;
-      for (const editor of vscode.window.visibleTextEditors) {
-        activeCount += this.decorateEditor(editor);
-      }
-      this.updateStatusBar(activeCount);
+      this.updateStatusBar(0);
       return;
     }
 
     const config = vscode.workspace.getConfiguration('devguard');
     const baseBranch = config.get<string>('baseBranch', 'main');
 
-    // Refresh diff for all workspace folders
+    // 1. Refresh git diff cache
     for (const folder of folders) {
       const addedLinesMap = await getBranchAddedLines(folder.uri.fsPath, baseBranch);
       for (const [filePath, lineSet] of addedLinesMap.entries()) {
@@ -87,184 +112,290 @@ export class LogCleanerFeature implements vscode.Disposable {
       }
     }
 
-    let detectedCount = 0;
+    // 2. Perform repo-wide scan
+    await this.scanEntireRepo(false);
+
+    // 3. Decorate visible editors
     for (const editor of vscode.window.visibleTextEditors) {
-      const count = this.decorateEditor(editor);
-      detectedCount += count;
+      this.decorateEditor(editor);
     }
 
-    this.totalDetectedLogs = detectedCount;
-    this.updateStatusBar(detectedCount);
+    // 4. Update Sidebar Tree View & Status Bar
+    const visibleLogs = this.getVisibleLogEntries();
+    let totalLogs = 0;
+    for (const list of visibleLogs.values()) {
+      totalLogs += list.length;
+    }
+
+    this.updateStatusBar(totalLogs);
+    this.treeDataProvider.refresh();
   }
 
-  private updateStatusBar(count: number): void {
-    if (count > 0) {
-      this.statusBarItem.text = `$(trash) ${count} debug log${count > 1 ? 's' : ''}`;
-      this.statusBarItem.tooltip = `DevGuard: ${count} debug statement(s) detected. Click to clean or comment out.`;
-      this.statusBarItem.show();
-    } else {
-      this.statusBarItem.text = '$(check) Logs Clean';
-      this.statusBarItem.tooltip = 'DevGuard: No debug statements detected.';
-      this.statusBarItem.show();
+  /**
+   * Scans entire workspace for debug statements across all supported languages.
+   */
+  public async scanEntireRepo(showNotification: boolean = false): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) return;
+
+    const includePattern =
+      '**/*.{ts,js,tsx,jsx,py,java,kt,c,cpp,cs,go,rs,php,rb,swift,dart,sh,ps1,ex,exs,r,lua,scala,pl}';
+    const excludePattern =
+      '{**/node_modules/**,**/dist/**,**/build/**,**/.git/**,**/out/**,**/target/**,**/vendor/**,**/.venv/**,**/bin/**,**/obj/**}';
+
+    const files = await vscode.workspace.findFiles(includePattern, excludePattern, 2000);
+    const newCache = new Map<string, DebugLogEntry[]>();
+    const config = vscode.workspace.getConfiguration('devguard');
+    const customPatterns = config.get<string[]>('customLogPatterns', []);
+
+    for (const fileUri of files) {
+      try {
+        const fileBytes = await vscode.workspace.fs.readFile(fileUri);
+        const text = Buffer.from(fileBytes).toString('utf8');
+        const lines = text.split('\n');
+        const fileEntries: DebugLogEntry[] = [];
+        const ext = path.extname(fileUri.fsPath).replace(/^\./, '').toLowerCase();
+        const relPath = vscode.workspace.asRelativePath(fileUri);
+        const normalized = path.normalize(fileUri.fsPath);
+        const branchLines = this.branchAddedLinesCache.get(normalized);
+
+        for (let i = 0; i < lines.length; i++) {
+          const lineText = lines[i];
+          const matched = matchDebugStatement(lineText, ext, customPatterns);
+          if (matched) {
+            fileEntries.push({
+              uri: fileUri,
+              relativePath: relPath,
+              line: i,
+              range: new vscode.Range(
+                new vscode.Position(i, matched.startIndex),
+                new vscode.Position(i, lineText.length)
+              ),
+              text: lineText.trim(),
+              functionName: matched.functionName,
+              isBranchOnly: branchLines ? branchLines.has(i) : false,
+            });
+          }
+        }
+
+        if (fileEntries.length > 0) {
+          newCache.set(normalized, fileEntries);
+        }
+      } catch {
+        // Skip unreadable files
+      }
+    }
+
+    this.allRepoLogsCache = newCache;
+
+    if (showNotification) {
+      let total = 0;
+      for (const entries of this.allRepoLogsCache.values()) {
+        total += entries.length;
+      }
+      vscode.window.showInformationMessage(
+        `DevGuard: Found ${total} debug statement(s) across ${this.allRepoLogsCache.size} file(s) in repository.`
+      );
+      // Focus sidebar
+      vscode.commands.executeCommand('workbench.view.extension.devguard-view-container');
     }
   }
 
   /**
-   * Decorates debug statements in a specific editor and returns the number found.
+   * Returns log entries filtered by scope (Entire Repo vs Branch) and filename filter.
    */
+  public getVisibleLogEntries(): Map<string, DebugLogEntry[]> {
+    const result = new Map<string, DebugLogEntry[]>();
+
+    for (const [filePath, entries] of this.allRepoLogsCache.entries()) {
+      const relPath = entries[0]?.relativePath || path.basename(filePath);
+
+      // Apply filename filter
+      if (this.fileFilter) {
+        const lowerFilter = this.fileFilter.toLowerCase();
+        const matchesFilter =
+          relPath.toLowerCase().includes(lowerFilter) ||
+          path.basename(filePath).toLowerCase().includes(lowerFilter);
+        if (!matchesFilter) continue;
+      }
+
+      // Apply scope filter
+      const filtered = entries.filter((entry) => {
+        if (this.currentScope === 'branchOnly') {
+          return entry.isBranchOnly === true;
+        }
+        return true;
+      });
+
+      if (filtered.length > 0) {
+        result.set(filePath, filtered);
+      }
+    }
+
+    return result;
+  }
+
+  private updateStatusBar(count: number): void {
+    const scopeLabel = this.currentScope === 'entireRepo' ? 'Repo' : 'Branch';
+    if (count > 0) {
+      this.statusBarItem.text = `$(trash) ${count} ${scopeLabel} logs`;
+      this.statusBarItem.tooltip = `DevGuard: ${count} debug statement(s) found in ${scopeLabel}. Click to scan / clean.`;
+      this.statusBarItem.show();
+    } else {
+      this.statusBarItem.text = `$(check) ${scopeLabel} Clean`;
+      this.statusBarItem.tooltip = `DevGuard: No debug statements detected in ${scopeLabel}.`;
+      this.statusBarItem.show();
+    }
+  }
+
   private decorateEditor(editor: vscode.TextEditor): number {
     const doc = editor.document;
     const normalizedPath = path.normalize(doc.uri.fsPath);
-    const addedLines = this.branchAddedLinesCache.get(normalizedPath);
+    const entries = this.allRepoLogsCache.get(normalizedPath) || [];
 
-    const debugEntries = this.scanDebugLogsInDocument(
-      doc,
-      addedLines && addedLines.size > 0 ? addedLines : undefined
-    );
-
-    const decorationOptions: vscode.DecorationOptions[] = debugEntries.map((entry) => ({
+    const decorationOptions: vscode.DecorationOptions[] = entries.map((entry) => ({
       range: entry.range,
       hoverMessage: new vscode.MarkdownString(
-        addedLines && addedLines.has(entry.line)
-          ? `🧹 **DevGuard:** Branch-added debug statement (\`${entry.functionName}\` [${doc.languageId}]).`
-          : `🧹 **DevGuard:** Debug statement detected (\`${entry.functionName}\` [${doc.languageId}]).`
+        `🧹 **DevGuard:** Debug statement detected (\`${entry.functionName}\`). File: \`${entry.relativePath}:${entry.line + 1}\``
       ),
     }));
 
     editor.setDecorations(this.logDecorationType, decorationOptions);
-    return debugEntries.length;
+    return entries.length;
   }
 
   /**
-   * Scans a document for debug statements across all languages.
+   * Filter the Debug Finder tree by file name or extension.
    */
-  private scanDebugLogsInDocument(
-    doc: vscode.TextDocument,
-    addedLines?: Set<number>
-  ): DebugLogEntry[] {
-    const entries: DebugLogEntry[] = [];
-    const lineCount = doc.lineCount;
+  public async promptFilterByFilename(): Promise<void> {
+    const input = await vscode.window.showInputBox({
+      title: 'DevGuard: Filter Debug Finder by Filename',
+      prompt: 'Enter search text or extension (e.g. sample, auth, .py, .ts)',
+      value: this.fileFilter,
+      placeHolder: 'e.g. auth, controller, sample.ts',
+    });
 
-    const config = vscode.workspace.getConfiguration('devguard');
-    const customPatterns = config.get<string[]>('customLogPatterns', []);
-
-    for (let i = 0; i < lineCount; i++) {
-      if (addedLines && !addedLines.has(i)) {
-        continue;
-      }
-
-      const line = doc.lineAt(i);
-      const text = line.text;
-
-      const matched = matchDebugStatement(text, doc.languageId, customPatterns);
-      if (matched) {
-        entries.push({
-          uri: doc.uri,
-          line: i,
-          range: new vscode.Range(
-            new vscode.Position(i, matched.startIndex),
-            new vscode.Position(i, line.text.length)
-          ),
-          text: text.trim(),
-          functionName: matched.functionName,
-        });
-      }
-    }
-
-    return entries;
-  }
-
-  /**
-   * Command: QuickPick list of debug statements for batch removal or commenting out.
-   */
-  public async cleanBranchLogs(): Promise<void> {
-    const folders = vscode.workspace.workspaceFolders;
-    const config = vscode.workspace.getConfiguration('devguard');
-    const baseBranch = config.get<string>('baseBranch', 'main');
-
-    if (folders && folders.length > 0) {
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: 'DevGuard: Scanning for multi-language debug statements...',
-          cancellable: false,
-        },
-        async () => {
-          for (const folder of folders) {
-            const addedLinesMap = await getBranchAddedLines(folder.uri.fsPath, baseBranch);
-            for (const [filePath, lineSet] of addedLinesMap.entries()) {
-              this.branchAddedLinesCache.set(path.normalize(filePath), lineSet);
-            }
-          }
-        }
+    if (input !== undefined) {
+      this.fileFilter = input.trim();
+      this.treeDataProvider.refresh();
+      const count = this.treeDataProvider.getTotalCount();
+      vscode.window.showInformationMessage(
+        this.fileFilter
+          ? `DevGuard: Filtered to "${this.fileFilter}" (${count} debug statements found).`
+          : 'DevGuard: Filter cleared. Showing all files.'
       );
     }
+  }
 
+  /**
+   * Toggles scan scope between Entire Repository and Branch-Added Only.
+   */
+  public toggleScanScope(): void {
+    this.currentScope = this.currentScope === 'entireRepo' ? 'branchOnly' : 'entireRepo';
+    this.treeDataProvider.refresh();
+    const count = this.treeDataProvider.getTotalCount();
+    vscode.window.showInformationMessage(
+      `DevGuard: Scope switched to ${this.currentScope === 'entireRepo' ? 'Entire Repository' : 'Branch Added Only'} (${count} found).`
+    );
+    this.updateStatusBar(count);
+  }
+
+  /**
+   * Command: QuickPick list of all repository debug statements grouped by file.
+   */
+  public async cleanWorkspaceLogs(): Promise<void> {
+    const visibleMap = this.getVisibleLogEntries();
     const allEntries: DebugLogEntry[] = [];
-    for (const [filePath, lineSet] of this.branchAddedLinesCache.entries()) {
-      try {
-        const uri = vscode.Uri.file(filePath);
-        const doc = await vscode.workspace.openTextDocument(uri);
-        const fileEntries = this.scanDebugLogsInDocument(doc, lineSet);
-        allEntries.push(...fileEntries);
-      } catch {}
+    for (const list of visibleMap.values()) {
+      allEntries.push(...list);
     }
 
     if (allEntries.length === 0) {
+      vscode.window.showInformationMessage('DevGuard: No debug statements detected in repository.');
+      return;
+    }
+
+    interface LogQuickPickItem extends vscode.QuickPickItem {
+      entry: DebugLogEntry;
+    }
+
+    const pickItems: LogQuickPickItem[] = allEntries.map((entry) => ({
+      label: `$(file-code) [${path.basename(entry.uri.fsPath)}:${entry.line + 1}] ${entry.text}`,
+      description: entry.relativePath,
+      detail: `Type: ${entry.functionName} • Line: ${entry.line + 1}`,
+      picked: true,
+      entry,
+    }));
+
+    const selected = await vscode.window.showQuickPick(pickItems, {
+      canPickMany: true,
+      title: `DevGuard: Clean Repository Debug Statements (${allEntries.length} found across ${visibleMap.size} files)`,
+      placeHolder: 'Type file name to filter, or select statements to remove/comment out...',
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+
+    if (!selected || selected.length === 0) return;
+
+    await this.promptActionAndApply(selected.map((s) => s.entry));
+  }
+
+  /**
+   * Command: Clean branch-added debug statements.
+   */
+  public async cleanBranchLogs(): Promise<void> {
+    const branchEntries: DebugLogEntry[] = [];
+    for (const list of this.allRepoLogsCache.values()) {
+      for (const entry of list) {
+        if (entry.isBranchOnly) {
+          branchEntries.push(entry);
+        }
+      }
+    }
+
+    if (branchEntries.length === 0) {
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor) {
-        const fileEntries = this.scanDebugLogsInDocument(activeEditor.document);
-        if (fileEntries.length > 0) {
+        const activeEntries = this.allRepoLogsCache.get(path.normalize(activeEditor.document.uri.fsPath)) || [];
+        if (activeEntries.length > 0) {
           const action = await vscode.window.showInformationMessage(
-            `DevGuard: No branch diff found against "${baseBranch}". Found ${fileEntries.length} debug statement(s) in active file (${path.basename(activeEditor.document.fileName)}). Clean them?`,
+            `DevGuard: No branch diff found. Found ${activeEntries.length} debug statement(s) in active file (${path.basename(activeEditor.document.fileName)}). Clean them?`,
             'Clean Active File Logs'
           );
           if (action === 'Clean Active File Logs') {
-            await this.promptAndCleanEntries(fileEntries, path.basename(activeEditor.document.fileName));
+            await this.promptActionAndApply(activeEntries);
             return;
           }
         }
       }
 
-      vscode.window.showInformationMessage(
-        `DevGuard: Clean! No debug statements detected against base branch "${baseBranch}".`
-      );
+      vscode.window.showInformationMessage('DevGuard: Clean! No branch-added debug logs detected.');
       return;
     }
 
-    await this.promptAndCleanEntries(allEntries, `Branch (${baseBranch})`);
-  }
-
-  /**
-   * Displays QuickPick for user confirmation and executes batch deletion or commenting.
-   */
-  private async promptAndCleanEntries(entries: DebugLogEntry[], contextLabel: string): Promise<void> {
     interface LogQuickPickItem extends vscode.QuickPickItem {
       entry: DebugLogEntry;
     }
 
-    const pickItems: LogQuickPickItem[] = entries.map((entry) => {
-      const relPath = vscode.workspace.asRelativePath(entry.uri);
-      return {
-        label: `$(trash) ${entry.text}`,
-        description: `${relPath}:${entry.line + 1}`,
-        detail: `Type: ${entry.functionName}`,
-        picked: true,
-        entry,
-      };
-    });
+    const pickItems: LogQuickPickItem[] = branchEntries.map((entry) => ({
+      label: `$(trash) [${path.basename(entry.uri.fsPath)}:${entry.line + 1}] ${entry.text}`,
+      description: entry.relativePath,
+      detail: `Type: ${entry.functionName}`,
+      picked: true,
+      entry,
+    }));
 
     const selected = await vscode.window.showQuickPick(pickItems, {
       canPickMany: true,
-      title: `DevGuard: Clean Debug Statements [${contextLabel}] (${entries.length} found)`,
-      placeHolder: 'Select debug statements to handle (Uncheck items you wish to keep)',
+      title: `DevGuard: Clean Branch Debug Statements (${branchEntries.length} found)`,
+      placeHolder: 'Select debug statements to remove (Uncheck items to keep)',
     });
 
-    if (!selected || selected.length === 0) {
-      return;
-    }
+    if (!selected || selected.length === 0) return;
+    await this.promptActionAndApply(selected.map((s) => s.entry));
+  }
 
-    // Ask user whether to DELETE or COMMENT OUT
+  private async promptActionAndApply(entries: DebugLogEntry[]): Promise<void> {
     const choice = await vscode.window.showQuickPick(
       [
         {
@@ -274,12 +405,12 @@ export class LogCleanerFeature implements vscode.Disposable {
         },
         {
           label: '$(comment) Comment out lines',
-          description: 'Prefix with language-appropriate comment characters (//, #, etc.)',
+          description: 'Prefix with appropriate comment characters (//, #, etc.)',
           action: 'comment' as const,
         },
       ],
       {
-        title: `DevGuard: Choose Cleanup Action for ${selected.length} Item(s)`,
+        title: `DevGuard: Action for ${entries.length} Debug Statement(s)`,
         placeHolder: 'Delete permanently or comment out?',
       }
     );
@@ -288,12 +419,12 @@ export class LogCleanerFeature implements vscode.Disposable {
 
     // Group by file URI and sort descending by line number
     const entriesByFile = new Map<string, DebugLogEntry[]>();
-    for (const item of selected) {
-      const key = item.entry.uri.toString();
+    for (const item of entries) {
+      const key = item.uri.toString();
       if (!entriesByFile.has(key)) {
         entriesByFile.set(key, []);
       }
-      entriesByFile.get(key)!.push(item.entry);
+      entriesByFile.get(key)!.push(item);
     }
 
     const workspaceEdit = new vscode.WorkspaceEdit();
@@ -310,7 +441,6 @@ export class LogCleanerFeature implements vscode.Disposable {
         if (choice.action === 'delete') {
           workspaceEdit.delete(uri, line.rangeIncludingLineBreak);
         } else {
-          // Comment out
           const indent = line.text.match(/^\s*/)?.[0] || '';
           const trimmed = line.text.substring(indent.length);
           const newLineText = `${indent}${commentPrefix}${trimmed}`;
@@ -327,13 +457,42 @@ export class LogCleanerFeature implements vscode.Disposable {
       );
       this.refreshDecorations();
     } else {
-      vscode.window.showErrorMessage('DevGuard: Failed to apply edits to debug logs.');
+      vscode.window.showErrorMessage('DevGuard: Failed to apply edits.');
     }
   }
 
-  /**
-   * Transforms console.log / print statements into structured logger or dev-guarded blocks.
-   */
+  public async openLocation(entry: DebugLogEntry): Promise<void> {
+    const doc = await vscode.workspace.openTextDocument(entry.uri);
+    await vscode.window.showTextDocument(doc, { selection: entry.range });
+  }
+
+  public async deleteLogNode(node: any): Promise<void> {
+    if (node instanceof DebugLogTreeItem && node.entry) {
+      const doc = await vscode.workspace.openTextDocument(node.entry.uri);
+      const line = doc.lineAt(node.entry.line);
+      const edit = new vscode.WorkspaceEdit();
+      edit.delete(node.entry.uri, line.rangeIncludingLineBreak);
+      await vscode.workspace.applyEdit(edit);
+      this.refreshDecorations();
+    } else if (node instanceof DebugFileTreeItem && node.entries) {
+      await this.promptActionAndApply(node.entries);
+    }
+  }
+
+  public async commentLogNode(node: any): Promise<void> {
+    if (node instanceof DebugLogTreeItem && node.entry) {
+      const doc = await vscode.workspace.openTextDocument(node.entry.uri);
+      const line = doc.lineAt(node.entry.line);
+      const commentPrefix = getCommentPrefix(doc.languageId);
+      const indent = line.text.match(/^\s*/)?.[0] || '';
+      const trimmed = line.text.substring(indent.length);
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(node.entry.uri, line.range, `${indent}${commentPrefix}${trimmed}`);
+      await vscode.workspace.applyEdit(edit);
+      this.refreshDecorations();
+    }
+  }
+
   public async transformLogs(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
@@ -342,7 +501,7 @@ export class LogCleanerFeature implements vscode.Disposable {
     }
 
     const doc = editor.document;
-    const entries = this.scanDebugLogsInDocument(doc);
+    const entries = this.allRepoLogsCache.get(path.normalize(doc.uri.fsPath)) || [];
     if (entries.length === 0) {
       vscode.window.showInformationMessage('DevGuard: No debug statements detected in active file.');
       return;
@@ -415,5 +574,112 @@ export class LogCleanerFeature implements vscode.Disposable {
     for (const d of this.disposables) {
       d.dispose();
     }
+  }
+}
+
+/**
+ * File Group Node in Debug Finder TreeView.
+ */
+class DebugFileTreeItem extends vscode.TreeItem {
+  constructor(public readonly filePath: string, public readonly entries: DebugLogEntry[]) {
+    const fileName = path.basename(filePath);
+    const dirName = path.dirname(entries[0]?.relativePath || filePath);
+
+    super(fileName, vscode.TreeItemCollapsibleState.Expanded);
+
+    this.description = `${dirName} (${entries.length})`;
+    this.tooltip = `${entries[0]?.relativePath} — ${entries.length} debug statement(s)`;
+    this.iconPath = vscode.ThemeIcon.File;
+    this.contextValue = 'debugFileGroup';
+  }
+}
+
+/**
+ * Individual Log Statement Node in Debug Finder TreeView.
+ */
+class DebugLogTreeItem extends vscode.TreeItem {
+  constructor(public readonly entry: DebugLogEntry) {
+    const label = `Line ${entry.line + 1}: ${entry.text}`;
+    super(label, vscode.TreeItemCollapsibleState.None);
+
+    this.description = `[${entry.functionName}]`;
+    this.tooltip = new vscode.MarkdownString(
+      `**Location:** \`${entry.relativePath}:${entry.line + 1}\`\n\n\`\`\`\n${entry.text}\n\`\`\``
+    );
+    this.iconPath = new vscode.ThemeIcon('symbol-property', new vscode.ThemeColor('editorWarning.foreground'));
+    this.contextValue = 'debugLogItem';
+
+    this.command = {
+      command: 'devguard.openLogLocation',
+      title: 'Jump to Debug Statement',
+      arguments: [entry],
+    };
+  }
+}
+
+/**
+ * TreeDataProvider for rendering repository debug statements grouped by file.
+ */
+class DebugFinderTreeDataProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
+  private _onDidChangeTreeData = new vscode.EventEmitter<vscode.TreeItem | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+  constructor(
+    private readonly getVisibleLogs: () => Map<string, DebugLogEntry[]>,
+    private readonly getScope: () => ScanScope,
+    private readonly getFilter: () => string
+  ) {}
+
+  refresh(): void {
+    this._onDidChangeTreeData.fire();
+  }
+
+  getTotalCount(): number {
+    let total = 0;
+    for (const list of this.getVisibleLogs().values()) {
+      total += list.length;
+    }
+    return total;
+  }
+
+  getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
+    return element;
+  }
+
+  getChildren(element?: vscode.TreeItem): Thenable<vscode.TreeItem[]> {
+    if (!element) {
+      // Root level: list of files
+      const visibleMap = this.getVisibleLogs();
+      const fileNodes: DebugFileTreeItem[] = [];
+
+      for (const [filePath, entries] of visibleMap.entries()) {
+        fileNodes.push(new DebugFileTreeItem(filePath, entries));
+      }
+
+      // Sort files alphabetically by relative path
+      fileNodes.sort((a, b) => a.filePath.localeCompare(b.filePath));
+
+      if (fileNodes.length === 0) {
+        const scope = this.getScope() === 'entireRepo' ? 'entire repository' : 'current branch';
+        const filter = this.getFilter();
+        const msg = filter
+          ? `No debug statements matching "${filter}"`
+          : `Clean! No debug statements found in ${scope}`;
+        const emptyItem = new vscode.TreeItem(msg, vscode.TreeItemCollapsibleState.None);
+        emptyItem.iconPath = new vscode.ThemeIcon('check');
+        return Promise.resolve([emptyItem]);
+      }
+
+      return Promise.resolve(fileNodes);
+    }
+
+    if (element instanceof DebugFileTreeItem) {
+      // Second level: list of logs in this file
+      const logNodes = element.entries.map((entry) => new DebugLogTreeItem(entry));
+      logNodes.sort((a, b) => a.entry.line - b.entry.line);
+      return Promise.resolve(logNodes);
+    }
+
+    return Promise.resolve([]);
   }
 }
